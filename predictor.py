@@ -1,22 +1,24 @@
 import os
-
 import joblib
-
 import numpy as np
-
 import pandas as pd
-
 import torch
-
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
-import pyttsx3
+
+# Make pyttsx3 optional for environments without TTS
+try:
+    import pyttsx3
+
+    PREDICTOR_TTS_AVAILABLE = True
+except Exception:
+    pyttsx3 = None
+    PREDICTOR_TTS_AVAILABLE = False
 from typing import Dict, Union
 
 # --- IMPORT MODULARIZED COMPONENTS (UPDATED: use hybrid transformer models) ---
 from models import HybridDNN, HybridCNN, HybridGRU
-from report_utils import handle_report_and_email
 from input import get_input_data, listen, parse_number, speak_local
 
 # -------------------------------------
@@ -30,15 +32,16 @@ COLOR_RED = (220, 20, 60)  # Crimson (HIGH RISK/URGENT)
 
 
 # --- VOICE (TTS) SETUP ---
-def speak(text):
-    """Speak and print text."""
+def speak_local(text):
+    """speak_local and print text."""
     print(f"🗣️ {text}")
     try:
-        engine = pyttsx3.init()
-        engine.setProperty("rate", 150)
-        engine.say(text)
-        engine.runAndWait()
-        engine.stop()
+        if PREDICTOR_TTS_AVAILABLE and pyttsx3 is not None:
+            engine = pyttsx3.init()
+            engine.setProperty("rate", 150)
+            engine.say(text)
+            engine.runAndWait()
+            engine.stop()
     except Exception:
         pass
 
@@ -48,32 +51,25 @@ def speak(text):
 # =================================================================
 
 DATA_CONFIG = {
-    # Engine Data: Failure Classification Task
     "engine": {
         "path": "engine_data.csv",
         "task": "classification",
         "target": "machine failure",
-        # 🛠️ FIX 1: Change 'Product ID' to lowercase 'product id'
-        "categorical_features": ["product id", "type"],
-        # 🛠️ FIX 2: Change casing in all input features to match the lowercased DataFrame
+        "categorical_features": [],
         "input_features": [
-            "product id",
-            "air temperature [k]",
-            "process temperature [k]",
-            "rotational speed [rpm]",
-            "torque [nm]",
-            "tool wear [min]",
+            "Product ID",
+            "Air temperature [K]",
+            "Process temperature [K]",
+            "Rotational speed [rpm]",
+            "Torque [Nm]",
+            "Tool wear [min]",
         ],
-        "final_numerical_features": [
-            "Temp_Diff",
-            "Power_Proxy",
-            "Overstrain_Proxy",
-        ],  # These are newly created, so they don't need case correction
+        "final_numerical_features": ["Temp_Diff", "Power_Proxy", "Overstrain_Proxy"],
     },
     "ev": {
         "path": "ev_data.csv",
         "task": "regression",
-        "target": "remaining_useful_life_cycles",
+        "target": "Remaining_Useful_Life_cycles",
         "categorical_features": [],
         "input_features": [
             "Cycle_Index",
@@ -86,14 +82,14 @@ DATA_CONFIG = {
             "Charging time (s)",
         ],
         "final_numerical_features": [
-            "cycle_index",
-            "discharge time (s)",
-            "decrement 3.6-3.4v (s)",
-            "max. voltage dischar. (v)",
-            "min. voltage charg. (v)",
-            "time at 4.15v (s)",
-            "time constant current (s)",
-            "charging time (s)",
+            "Cycle_Index",
+            "Discharge Time (s)",
+            "Decrement 3.6-3.4V (s)",
+            "Max. Voltage Dischar. (V)",
+            "Min. Voltage Charg. (V)",
+            "Time at 4.15V (s)",
+            "Time constant current (s)",
+            "Charging time (s)",
         ],
     },
 }
@@ -109,7 +105,7 @@ def run_prediction():
     # -----------------------------
     # Step 0: Input Mode Selection
     # -----------------------------
-    speak("Please select the input mode: Voice or Text.")
+    speak_local("Please select the input mode: Voice or Text.")
 
     input_mode = None
     while input_mode not in ["voice", "text"]:
@@ -117,13 +113,20 @@ def run_prediction():
         user_choice = input("➡ Your choice: ").lower().strip()
         if user_choice in ["voice", "text"]:
             input_mode = user_choice
-            speak(f"Selected input mode: {input_mode.upper()}.")
+            speak_local(f"Selected input mode: {input_mode.upper()}.")
         else:
-            speak("Invalid choice. Please type 'voice' or 'text'.")
+            speak_local("Invalid choice. Please type 'voice' or 'text'.")
+        if input_mode == "voice":
+            from input import initialize_voice_model
+
+            model = initialize_voice_model()
+            if model is None:
+                speak_local("⚠️ Could not load voice model. Switching to text mode.")
+                input_mode = "text"
     # -----------------------------
     # Step 1: LOAD DATA AND DEFINE PREPROCESSOR
     # -----------------------------
-    speak("What type of vehicle are you diagnosing? Please say 'engine' or 'EV'.")
+    speak_local("What type of vehicle are you diagnosing? Please say 'engine' or 'EV'.")
 
     vehicle_choice_key = None
     while vehicle_choice_key is None:
@@ -136,9 +139,9 @@ def run_prediction():
         elif "ev" in text or "battery" in text or "electric" in text:
             vehicle_choice_key = "ev"
         else:
-            speak("I couldn't understand. Please try again.")
+            speak_local("I couldn't understand. Please try again.")
 
-    speak(f"You selected: {vehicle_choice_key.upper()} diagnosis.")
+    speak_local(f"You selected: {vehicle_choice_key.upper()} diagnosis.")
 
     config = DATA_CONFIG[vehicle_choice_key]
     DATA_PATH = config["path"]
@@ -148,7 +151,7 @@ def run_prediction():
     TASK_TYPE = config["task"]
 
     if not os.path.exists(DATA_PATH):
-        speak(
+        speak_local(
             f"⚠️ Warning: {DATA_PATH} not found. Using dummy data for preprocessor fit."
         )
         dummy_data = {
@@ -173,16 +176,15 @@ def run_prediction():
     else:
         data = pd.read_csv(DATA_PATH)
 
-    data.columns = data.columns.str.lower().str.strip()
     data = data.fillna(0)
 
     # --- FEATURE ENGINEERING ---
     if vehicle_choice_key == "engine":
         data["Temp_Diff"] = (
-            data["process temperature [k]"] - data["air temperature [k]"]
+            data["Process temperature [K]"] - data["Air temperature [K]"]
         )
-        data["Power_Proxy"] = data["torque [nm]"] * data["rotational speed [rpm]"]
-        data["Overstrain_Proxy"] = data["tool wear [min]"] * data["torque [nm]"]
+        data["Power_Proxy"] = data["Torque [Nm]"] * data["Rotational speed [rpm]"]
+        data["Overstrain_Proxy"] = data["Tool wear [min]"] * data["Torque [Nm]"]
         X_fit = data[FINAL_NUM_FEATURES + CAT_FEATURES]
     else:
         X_fit = data[FINAL_NUM_FEATURES]
@@ -203,7 +205,9 @@ def run_prediction():
     try:
         preprocessor.fit(X_fit)
     except ValueError as e:
-        speak(f"Error fitting preprocessor: {e}. Check data file and column names.")
+        speak_local(
+            f"Error fitting preprocessor: {e}. Check data file and column names."
+        )
         return
 
     # --- DETERMINE FINAL FEATURES, INPUT SIZE, AND BACKGROUND DATA ---
@@ -221,7 +225,7 @@ def run_prediction():
         feature_names = FINAL_NUM_FEATURES
 
     INPUT_SIZE = len(feature_names)
-    speak(f"Model will require {INPUT_SIZE} features after preprocessing.")
+    speak_local(f"Model will require {INPUT_SIZE} features after preprocessing.")
 
     X_fit_processed = preprocessor.transform(X_fit)
     background_data = X_fit_processed
@@ -239,33 +243,35 @@ def run_prediction():
     ]
 
     if not model_files:
-        speak(f"⚠️ Error: No saved {vehicle_choice_key.upper()} models found. Exiting.")
+        speak_local(
+            f"⚠️ Error: No saved {vehicle_choice_key.upper()} models found. Exiting."
+        )
         return
 
-    speak(f"Available {vehicle_choice_key.upper()} models are:")
+    speak_local(f"Available {vehicle_choice_key.upper()} models are:")
     for i, f in enumerate(model_files, 1):
         display_name = f.replace(prefix, "")
-        speak(f"Option {i}: {display_name}")
+        speak_local(f"Option {i}: {display_name}")
 
     choice = None
     while choice is None:
-        speak("Please say or type the number of the model you want to use.")
+        speak_local("Please say or type the number of the model you want to use.")
         model_choice_text = input("Model Choice (number): ")
         try:
             choice_val = int(model_choice_text)
             if 1 <= choice_val <= len(model_files):
                 choice = choice_val
-                speak(
+                speak_local(
                     f"You selected option {choice}: {model_files[choice - 1].replace(prefix, '')}"
                 )
             else:
-                speak("Invalid number.")
+                speak_local("Invalid number.")
         except ValueError:
-            speak("Invalid input. Please enter a number.")
+            speak_local("Invalid input. Please enter a number.")
 
     model_file = model_files[choice - 1]
     model_path = os.path.join("models", model_file)
-    speak(f"Selected model is {model_file}")
+    speak_local(f"Selected model is {model_file}")
 
     model_type = None
     model = None
@@ -283,7 +289,9 @@ def run_prediction():
             elif "gru_model.pt" in base_name:
                 model = HybridGRU(INPUT_SIZE)
             else:
-                speak(f"Error: Missing class definition for {base_name}. Skipping.")
+                speak_local(
+                    f"Error: Missing class definition for {base_name}. Skipping."
+                )
                 model = None
 
             if model is not None:
@@ -291,19 +299,19 @@ def run_prediction():
                 model.load_state_dict(state_dict)
                 model.eval()
                 model_type = "deep"
-                speak("✅ PyTorch model loaded successfully.")
+                speak_local("✅ PyTorch model loaded successfully.")
 
         except Exception as e:
-            speak(f"ERROR: Could not load the PyTorch model file: {e}")
+            speak_local(f"ERROR: Could not load the PyTorch model file: {e}")
             model = None
 
     elif model_file.endswith(".pkl"):
         try:
             model = joblib.load(model_path)
             model_type = "ml"
-            speak("✅ ML model (.pkl) loaded successfully.")
+            speak_local("✅ ML model (.pkl) loaded successfully.")
         except Exception as e:
-            speak(
+            speak_local(
                 f"ERROR: Model file not found or load error: {e}. Prediction will be skipped."
             )
             model = None
@@ -315,43 +323,37 @@ def run_prediction():
     # Step 4: Collect feature values
     # -----------------------------
     raw_input_dict = get_input_data(
-        speak, listen, parse_number, INPUT_FEATURES, vehicle_choice_key, input_mode
+        speak_local,
+        listen,
+        parse_number,
+        INPUT_FEATURES,
+        vehicle_choice_key,
+        input_mode,
     )
 
     if not raw_input_dict:
-        speak("Data collection failed. Aborting prediction.")
+        speak_local("Data collection failed. Aborting prediction.")
         return
 
     # -----------------------------
     # Step 5: Preprocess (Load Saved Preprocessor)
     # -----------------------------
-    if "type" in CAT_FEATURES:
-        raw_input_dict["type"] = "l"
     X_raw_df = pd.DataFrame([raw_input_dict])
-
-    X_raw_df.columns = X_raw_df.columns.str.lower().str.strip()
 
     # ----- Feature Engineering -----
     if vehicle_choice_key == "engine":
         X_raw_df["Temp_Diff"] = (
-            X_raw_df["process temperature [k]"] - X_raw_df["air temperature [k]"]
+            X_raw_df["Process temperature [K]"] - X_raw_df["Air temperature [K]"]
         )
         X_raw_df["Power_Proxy"] = (
-            X_raw_df["torque [nm]"] * X_raw_df["rotational speed [rpm]"]
+            X_raw_df["Torque [Nm]"] * X_raw_df["Rotational speed [rpm]"]
         )
         X_raw_df["Overstrain_Proxy"] = (
-            X_raw_df["tool wear [min]"] * X_raw_df["torque [nm]"]
+            X_raw_df["Tool wear [min]"] * X_raw_df["Torque [Nm]"]
         )
         X_final = X_raw_df[FINAL_NUM_FEATURES + CAT_FEATURES]
-        if vehicle_choice_key == "engine":
-            # Create a dictionary mapping the current lowercase names to the expected saved names
-            rename_map = {"product id": "Product ID", "type": "Type"}
-            X_final = X_final.rename(columns=rename_map)
     else:
         X_final = X_raw_df[FINAL_NUM_FEATURES]
-
-        rename_map = {k.lower().strip(): k for k in DATA_CONFIG["ev"]["input_features"]}
-        X_final = X_final.rename(columns=rename_map)
 
     # ----- Load Preprocessor -----
     preproc_path = os.path.join("models", f"{vehicle_choice_key}_preprocessor.pkl")
@@ -368,7 +370,7 @@ def run_prediction():
     # -----------------------------
     # Step 6 & 7: Predict and Output
     # -----------------------------
-    speak("Analyzing data and predicting status...")
+    speak_local("Analyzing data and predicting status...")
 
     pred_value = np.nan
     rul_cycles = np.nan
@@ -397,7 +399,7 @@ def run_prediction():
                 pred_prob = pred_value
 
     except Exception as e:
-        speak(f"Prediction failed: {e}")
+        speak_local(f"Prediction failed: {e}")
 
     # --- Status Message and Color Assignment ---
     if np.isnan(pred_value):
@@ -427,7 +429,7 @@ def run_prediction():
             else:
                 status_color = "greenstatus"
 
-    speak(f"The predicted status is: {status_message}")
+    speak_local(f"The predicted status is: {status_message}")
     print(
         f"\n🚗 Predicted Vehicle Status: {status_message} ({vehicle_choice_key.upper()})\n"
     )
@@ -435,7 +437,7 @@ def run_prediction():
     # -----------------------------
     # Step 8: Generate Explanations (SHAP & LIME)
     # -----------------------------
-    speak("Generating explanations for model decision. This may take a moment.")
+    speak_local("Generating explanations for model decision. This may take a moment.")
     top_feature = "N/A"
     explanation_summary = "Explanation generation skipped."
 
@@ -446,7 +448,7 @@ def run_prediction():
 
         top_feature_index = top_indices[0] if top_indices.size > 0 else 0
         top_feature = feature_names[top_feature_index].replace(
-            "product ID_", "Quality: "
+            "Product ID_", "Quality: "
         )
 
         shap_summary = f"SHAP analysis driven by **{feature_names[top_indices[0]]}**."
@@ -466,6 +468,9 @@ def run_prediction():
     # Step 9: Report Generation and Email (Modularized)
     # -----------------------------
     rul_cycles_report = rul_cycles if not np.isnan(rul_cycles) else 0.0
+
+    # Import report_utils functions only when needed (avoid import cycles)
+    from report_utils import handle_report_and_email
 
     handle_report_and_email(
         raw_input_dict,
